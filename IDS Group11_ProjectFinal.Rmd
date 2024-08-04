@@ -1,0 +1,617 @@
+
+```{r}
+# Loading the required libraries 
+# install.packages("arrow")
+library(arrow)
+library(tidyverse)
+library(lobstr)
+library(imputeTS)
+library(curl)
+library(httr)
+library(xml2)
+library(corrplot)
+library(xgboost)
+library(readr)
+library(stringr)
+library(dplyr)
+library(caret)
+library(recipes)
+library(ggplot2)
+library(shapviz)
+library(arrow)
+library(dplyr)
+```
+
+
+```{r}
+# URL for static house data info Parquet file
+static_house_info_url <- "https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/static_house_info.parquet"
+
+# Using the arrow package to read the static house information data.
+static_house_info <- arrow::read_parquet(static_house_info_url)
+
+#Removing the columns which are not required from the dataset
+columns_to_remove <- c(
+  "in.cec_climate_zone",
+  "in.dehumidifier",
+  "in.electric_vehicle",
+  "in.emissions_electricity_folders",
+  "in.emissions_electricity_values_or_filepaths",
+  "in.geometry_building_horizontal_location_mf",
+  "in.geometry_building_horizontal_location_sfa",
+  "in.geometry_building_level_mf",
+  "in.geometry_building_number_units_mf",
+  "in.geometry_building_number_units_sfa",
+  "in.geometry_building_type_acs",
+  "in.geometry_building_type_height",
+  "in.geometry_building_type_recs",
+  "in.hot_water_distribution",
+  "in.holiday_lighting",
+  "in.hot_water_distribution",
+  "in.hvac_has_shared_system",
+  "in.hvac_secondary_heating_efficiency",
+  "in.hvac_secondary_heating_type_and_fuel",
+  "in.hvac_shared_efficiencies",
+  "in.hvac_system_single_speed_ac_airflow",
+  "in.hvac_system_single_speed_ac_charge",
+  "in.hvac_system_single_speed_ashp_airflow",
+  "in.hvac_system_single_speed_ashp_charge",
+  "in.iso_rto_region",
+  "in.mechanical_ventilation",
+  "in.overhangs",
+  "in.simulation_control_run_period_begin_day_of_month",
+  "in.simulation_control_run_period_begin_month",
+  "in.solar_hot_water",
+  "in.units_represented"
+)
+
+```
+
+
+```{r}
+#Deleting the specific columns from the static house dataset
+static_house_info <- static_house_info %>%
+  select(-one_of(columns_to_remove))
+
+# Display the structure of the modified dataset
+# (check the column names and data types)
+str(static_house_info)
+
+# Display the modified dataset
+# (this will help to inspect the dataset after removing specified columns)
+static_house_info
+
+
+
+```
+
+```{r}
+#separating the data according to latitudinal and longitudinal components 
+#and generating a new column region
+
+static_house_info <- static_house_info %>%
+  mutate(region = case_when(
+    in.weather_file_latitude < 32 & in.weather_file_longitude < -80 ~ "Northeast",
+    in.weather_file_latitude < 32 & in.weather_file_longitude >= -80 ~ "Midwest",
+    in.weather_file_latitude >= 32 & in.weather_file_longitude < -80 ~ "Southeast",
+    TRUE ~ "West"
+  ))
+```
+
+```{r}
+#Filter static_house_data to include only rows where region is "West" and in.bedrooms is "5"
+
+static_house_info_f <- static_house_info %>%
+  filter (region=="West") %>% 
+  filter(in.bedrooms=="5")
+
+# View the filtered data frame
+View(static_house_info_f)
+```
+
+
+```{r}
+# Create an empty data frame to store the row sums daywise
+result_df_daywise <- data.frame(building_id = character(), day_total_energy = numeric(), date = as.Date(character()))
+
+# Loop through each row in static_house_info
+for (i in 1:nrow(static_house_info_f)) {
+  
+  print(i)  # Print the iteration number for tracking progress
+  
+  # Read Parquet file from a URL and create a data frame
+  x <- data.frame(read_parquet(
+    sprintf("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/2023-houseData/%s.parquet", static_house_info_f$bldg_id[i])))
+  x$time <- as.Date(x$time)
+
+  # Subset data for July
+  Three_months_data <- x[format(x$time, "%m") %in% c("06", "07", "08"), ]
+
+  # Calculate row sums for each day in July
+  daily_sums_Three_months_data <- tapply(rowSums(Three_months_data[, 1:42], na.rm = TRUE), as.Date(Three_months_data$time), sum, na.rm = TRUE)
+
+  # Create a data frame with building_id, day_total_energy, and date
+  daily_result_df_three_months <- data.frame(
+    building_id = static_house_info_f$bldg_id[i],
+    day_total_energy = daily_sums_Three_months_data,
+    date = names(daily_sums_Three_months_data)
+  )
+
+  daily_result_df_three_months
+  # Append results to the new data frame
+  result_df_daywise <- rbind(result_df_daywise, daily_result_df_three_months)
+}
+
+write.csv(result_df_daywise, "result_df_daywise.csv")
+
+# Print the resulting data frame
+print(result_df_daywise)
+```
+
+
+```{r}
+
+# Specifying the directory where we want to save the csv file.
+#directory_path <- "C:\Users\useR\OneDrive\Desktop\Intro to DS"
+
+# Concatenate the directory path with the filename
+#file_path <- paste0(directory_path, "result_df_daywise.csv")
+
+# Write the dataframe to the CSV file
+#write.csv(result_df_daywise, "result_df_daywise.csv", row.names = TRUE)
+
+#To save processing time,we got the dataframe of energy dataset from above code loop 
+#and then we converted it into csv file and imported into the environment.
+library(readr)
+result_df_daywise <- read_csv("C:/Users/musal/OneDrive/Documents/SEM 2/IDS/FINAL_PROJECT/result_df_daywise.csv")
+View(result_df_daywise)
+```
+
+
+
+```{r}
+#from static_house_info retrieve unique counties
+unique_counties <- unique(static_house_info$in.county)
+
+#store weather data in an empty tibble
+weather <- tibble(
+  `Dry Bulb Temperature [°C]` = numeric(),
+  `Relative Humidity [%]` = numeric(),
+  `Wind Speed [m/s]` = numeric(),
+  `Wind Direction [Deg]` = numeric(),
+  `Global Horizontal Radiation [W/m2]` = numeric(),
+  `Direct Normal Radiation [W/m2]` = numeric(),
+  `Diffuse Horizontal Radiation [W/m2]` = numeric(),
+  in.county = character()
+)
+
+#Create a Loop through each unique county to get the weather data
+for (county in unique_counties) {
+  # Reading weather data from CSV 
+  weather_csvdata <- read_csv(paste0("https://intro-datascience.s3.us-east-2.amazonaws.com/SC-data/weather/2023-weather-data/", county, ".csv")) %>%
+    select(date_time, `Dry Bulb Temperature [°C]`, `Relative Humidity [%]`, `Wind Speed [m/s]`, `Wind Direction [Deg]`, `Global Horizontal Radiation [W/m2]`, `Direct Normal Radiation [W/m2]`, `Diffuse Horizontal Radiation [W/m2]`) %>%
+    filter(date_time >= as.Date("2018-07-01"), date_time <= as.Date("2018-07-31")) %>%
+    mutate(in.county = county)
+  
+  #for each county combine the weather data
+  weather <- bind_rows(weather, weather_csvdata)
+}
+
+# Store the final weather data
+weather_finaldata <- weather
+
+#To eliminate the time part, convert 'date_time' to a Date object.
+weather_finaldata$date_time <- as.Date(weather_finaldata$date_time, format = "%Y-%m-%d %H:%M:%S")
+
+#Group by data according to "in.county" and "date_time," then get the median for each weather variable.
+weather_finaldata <- weather_finaldata %>% group_by(in.county, date_time) %>% summarise(
+  median_Direct_Normal_Radiation = median(`Direct Normal Radiation [W/m2]`, na.rm = TRUE),
+  median_Diffuse_Horizontal_Radiation = median(`Diffuse Horizontal Radiation [W/m2]`, na.rm = TRUE),
+  median_Dry_Bulb_Temperature = median(`Dry Bulb Temperature [°C]`, na.rm = TRUE),
+  median_Relative_Humidity = median(`Relative Humidity [%]`, na.rm = TRUE),
+  median_Wind_Speed = median(`Wind Speed [m/s]`, na.rm = TRUE),
+  median_Wind_Direction = median(`Wind Direction [Deg]`, na.rm = TRUE),
+  median_Global_Horizontal_Radiation = median(`Global Horizontal Radiation [W/m2]`, na.rm = TRUE)
+)
+
+```
+
+
+```{r}
+# Rename 'building_id' to 'bldg_id' 
+result_df_daywise <- result_df_daywise %>% rename(bldg_id = building_id)
+
+# Merge static_house_info and result_df_daywise using the merge function
+static_house_info_df1 <- merge(static_house_info, result_df_daywise, by = "bldg_id")
+
+#Using the common column "bldg_id," it aims to combine the original 
+#static_house_info information with the result_df_daywise dataset.
+#This enables us to merge daily energy use data with static building information and stored in
+#static_house_info_df1.
+
+```
+
+```{r}
+# Renaming 'date_time' to 'date' 
+weather_finaldata <- weather_finaldata %>% rename(date = date_time)
+
+# Merge static_house_info_df1 and weather_finaldata using the merge function
+# Note:We use the common columns 'date' and 'in.county' to merge
+merge_static_house_info_df <- merge(static_house_info_df1, weather_finaldata, by = c("date", "in.county"), all.x = TRUE)
+#combining "weather_finaldata" and "static_house_info_df1"
+#datasets using the common columns, "date" and "in.county."
+#The 'all.x = TRUE' parameter guarantees that every row from'static_house_info_df1' 
+#is included in the combined dataset, even in the event that 'weather_finaldata' 
+#does not have a matching item.
+
+#view(weather_finaldata)
+#str(merge_static_house_info_df)
+#summary(merge_static_house_info_df)
+
+
+```
+
+
+```{r}
+#To obtain a list of distinct values for every column in merge_static_house_info_df,
+#use lapply.
+each_column_uniquevalue <- lapply(merge_static_house_info_df, unique)
+
+#Show merge_static_house_info_df's dimensions (number of rows and columns).
+dim(merge_static_house_info_df)
+```
+
+
+```{r}
+# To eliminate columns with a single unique value, define the function "dropping_unique_columns."
+droping_unique_columns <- 
+  function(data) {
+# Identify columns with a single unique value using sapply and unique
+  single_unique_cols <- sapply(data, function(col) length(unique(col)) == 1)
+    
+# Return the input data frame after the removal of  single-unique columns
+    return(data[, !single_unique_cols, drop = FALSE])
+  }
+
+#Utilize the function "dropping unique columns" on the "merge static house info df" field.
+merge_static_house_info_df2 <- droping_unique_columns(merge_static_house_info_df)
+```
+
+
+```{r}
+# Filter rows where 'day_total_energy' is equal to or greater than zero.
+merge_static_house_info_df2 <- merge_static_house_info_df2 %>% filter(day_total_energy >= 0)
+
+# Display the dimensions of the resulting data frame using dim
+dim(merge_static_house_info_df2)
+```
+
+
+```{r}
+in_geometry_floor_area_mapping <- c("0-499"=1 ,"500-749"=2,"750-999"=3,"1000-1499"=4,"1500-1999"=5,"2000-2499"=6,"2500-2999"=7,"3000-3999"=8,"4000+"=9)         
+in_hot_water_fixtures_mapping <- c("100% Usage"=1, "50% Usage"=0, "200% Usage"=2)
+upgrade_cooking_range_mapping <- c("Electric, Induction, 100% Usage"=1, "Electric, Induction, 80% Usage"=0,  "Electric, Induction, 120% Usage"=3)
+in_occupants_mapping <- c("1"=1  , "2"=2,"3"=3,"4"=4,"5"=5,"8"=8,"6"=6,"7"=7,"10+"=10,"9"=9)
+in_vacancy_status_mapping <- c("Occupied"=1, "Vacant"=0 )
+income_mapping <- c("<10000"=1, "10000-14999"=2, "15000-19999"=3, "20000-24999"=4, "25000-29999"=5, "30000-34999"=6, "35000-39999"=7, "40000-44999"=8, "45000-49999"=9, "50000-59999"=10, "60000-69999"=11, "70000-79999"=12, "80000-99999"=13, "100000-119999"=14, "120000-139999"=15, "140000-159999"=16, "160000-179999"=17, "180000-199999"=18, "200000+"=19)
+```
+
+
+```{r}
+
+# Use predefined mappings to convert category columns to numeric data.
+
+merge_static_house_info_df2$in.geometry_floor_area <- as.numeric(in_geometry_floor_area_mapping[merge_static_house_info_df2$in.geometry_floor_area])
+
+
+merge_static_house_info_df2$in.hot_water_fixtures <- as.numeric(in_hot_water_fixtures_mapping[merge_static_house_info_df2$in.hot_water_fixtures])
+
+
+merge_static_house_info_df2$upgrade.cooking_range <- as.numeric(upgrade_cooking_range_mapping[merge_static_house_info_df2$upgrade.cooking_range])
+
+
+merge_static_house_info_df2$in.occupants <- as.numeric(in_occupants_mapping[merge_static_house_info_df2$in.occupants])
+
+str(merge_static_house_info_df2$in.occupants)
+
+
+merge_static_house_info_df2$in.vacancy_status <- as.numeric(in_vacancy_status_mapping[merge_static_house_info_df2$in.vacancy_status])
+
+
+merge_static_house_info_df2$in.income <- as.numeric(income_mapping[merge_static_house_info_df2$in.occupants])
+#using str display the structure of the 'in.income' column after conversion 
+str(merge_static_house_info_df2$in.income)
+```
+
+
+
+
+```{r}
+# To process, make a copy of the data frame.
+merge_static_house_info_df3 <- merge_static_house_info_df2
+
+#Use Function to calculate the percentage of null values in each column
+calculate_null_percentage <- function(data) {
+  # Determine the total number of null values and divide it by the column's length.
+  sapply(data, function(col) sum(is.na(col)) / length(col) * 100)
+}
+
+# A function to filter columns according to the threshold of the null percentage
+filter_columns_by_threshold <- function(data, threshold) {
+  # Calculate the null percentage for each column
+  column_null_percentage <- calculate_null_percentage(data)
+  
+# Choose columns in which the null % falls below the designated cutoff.
+  columns_above_threshold <- names(column_null_percentage[column_null_percentage < threshold])
+  
+  return(data[, columns_above_threshold, drop = FALSE])
+}
+
+# Assuming the name "static_house_energy_w_df3" for the original data frame
+#Define the desired null percentage cutoff, such as 80%.
+null_percentage_threshold <- 80
+
+# Filter columns using the functions by applying a null percentage threshold to each.
+column_null_percentage <- calculate_null_percentage(merge_static_house_info_df3)
+columns_above_threshold <- filter_columns_by_threshold(merge_static_house_info_df3, null_percentage_threshold)
+
+# Print the dimensions of the resulting data frame using dim
+print(dim(columns_above_threshold))
+
+
+```
+
+```{r}
+#Retain 90% of the rows after eliminating NA rows.
+# Rows in the data frame with missing values (NA) can be eliminated using the 'na.omit' function.
+merge_static_house_info_df3 <- merge_static_house_info_df2
+
+# Drop rows with missing values (NA)
+merge_static_house_info_df3 <- na.omit(merge_static_house_info_df3)
+```
+
+
+```{r}
+# Load required libraries
+library(caret)
+
+# Create a copy of the dataset
+merge_static_house_info_df4 <- merge_static_house_info_df3
+
+# Choose columns where there are more than one distinct value.
+merge_static_house_info_df4 <- merge_static_house_info_df4 %>%
+  select(where(~n_distinct(.) > 1))
+
+# Create a copy for prediction
+merge_static_house_info_df_prediction <- merge_static_house_info_df4 
+
+#Make a subset with the building and county information in specific columns.
+merge_static_house_info_df_building_and_county <- merge_static_house_info_df4[,c('bldg_id','in.county','date')]
+
+# Omit columns that are not required for modeling
+merge_static_house_info_df4 <- merge_static_house_info_df4 %>% select(-c('bldg_id','in.county'))
+
+#view(merge_static_house_info_df4)
+
+# Set seed for reproducibility
+set.seed(123)
+
+#training and testing sets
+index <- createDataPartition(merge_static_house_info_df4$day_total_energy, p = 0.7, list = FALSE)
+train_df1 <- merge_static_house_info_df4[index, ]
+test_df1 <- merge_static_house_info_df4[-index, ]
+
+view(test_df1)
+
+
+#Develop a linear regression model
+ model <- lm(day_total_energy ~ median_Dry_Bulb_Temperature + 
+    in.dishwasher + median_Wind_Speed + in.hvac_heating_efficiency + 
+    in.clothes_washer + in.hvac_heating_efficiency +in.bathroom_spot_vent_hour+in.county_and_puma + 
+     + median_Direct_Normal_Radiation + median_Diffuse_Horizontal_Radiation + median_Global_Horizontal_Radiation + in.sqft + in.geometry_floor_area + in.occupants +
+      in.hot_water_fixtures + in.vacancy_status, data = train_df1)
+# Print the summary
+summary(model)
+
+# Make predictions on the test set
+predictions <- predict(model, newdata = test_df1)
+
+
+# Calculate RMSE *Root Mean Squared Error* using the test data
+rmse <- sqrt(mean((test_df1$day_total_energy - predictions)^2))
+print(paste("Root Mean Squared Error on test data:", rmse))
+
+
+cat("Minimum:", min(test_df1$day_total_energy), "\n")
+cat("Maximum:", max(test_df1$day_total_energy), "\n")
+cat("Mean:", mean(test_df1$day_total_energy), "\n")
+
+# Calculate MAPE * Mean Absolute Percentage Error* using the test data
+mape <- mean(abs((test_df1$day_total_energy - predictions) / test_df1$day_total_energy )) * 100
+
+# Print the result
+print(paste("MAPE:", mape))
+
+view(predictions)
+```
+
+```{r}
+svm_model <- train(day_total_energy ~ in.sqft+in.geometry_floor_area+in.occupants+in.hot_water_fixtures+in.vacancy_status+in.geometry_floor_area_bin+in.cooking_range+in.dishwasher+in.geometry_garage,  data = train_df1, C = 4, cross = 2, prob.model = TRUE)
+
+svmPred <- predict(svm_model, newdata = test_df1)
+
+```
+
+
+```{r}
+library(ggplot2)
+
+# Generating a Box plot for total energy consumption across various building climate zones
+ggplot(merge_static_house_info_df4, aes(x = in.building_america_climate_zone, y = day_total_energy)) +
+  geom_boxplot(fill = "orange", color = "skyblue") +
+  labs(title = "Distribution of Energy Usage Across Different Climate zones in Buildings", x= "Building Climate Zone",
+       y = "Total Energy Consumption") +
+ theme_minimal()
+```
+
+
+```{r}
+library(dplyr)
+#using  vintage calculate average energy consumption 
+average_energy_by_vintage <- merge_static_house_info_df4 %>%
+  group_by(in.vintage) %>%
+  summarize(avg_energy = mean(day_total_energy, na.rm = TRUE))
+
+# Plotting the results
+library(ggplot2)
+ggplot(average_energy_by_vintage, aes(x = in.vintage, y = avg_energy)) +
+  geom_bar(stat = "identity", fill = "maroon") +
+  labs(title = "Energy Consumption Based on Building Vintage",
+       x = "Vintage",
+       y = "Average Energy Consumption")
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+#By using city, calculate average energy consumption 
+average_energy_by_city <- merge_static_house_info_df4 %>%
+  group_by(in.weather_file_city) %>%
+  summarize(avg_energy = mean(day_total_energy, na.rm = TRUE))
+
+# Plotting the results 
+ggplot(average_energy_by_city, aes(x = in.weather_file_city, y = avg_energy)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Average Energy Consumption by City",
+       x = "City",
+       y = "Average Energy Consumption") +
+  theme(axis.text.x = element_text(angle =45,hjust=1))
+```
+
+
+
+```{r}
+# Load the required libraries
+# install.packages("ggplot2")
+library(ggplot2)
+
+#Gradient-colored scatter plot showing total energy consumption versus another variable
+ggplot(merge_static_house_info_df4, aes(x = median_Dry_Bulb_Temperature, y = day_total_energy, color = median_Dry_Bulb_Temperature)) +
+  geom_point(size = 3) +
+  scale_color_gradient(low = "purple", high = "skyblue", name = "Temperature") +
+  labs(title = "Total Energy Consumption vs. Dry Bulb Temperature",
+       x = "Temperature",
+       y = "Total Energy Consumption") +
+  theme_minimal()
+
+```
+
+```{r}
+# Load required libraries
+# install.packages(c("ggplot2", "scales"))
+library(ggplot2)
+library(scales)
+
+# Using the dataset'merge_static_house_info_df3' as an example
+#If required, replace with your real dataset.
+data <- merge_static_house_info_df4
+
+# Make a bar chart showing how much energy is used over time
+ggplot(data, aes(x = date, y = day_total_energy)) +
+  geom_bar(stat = "identity", fill = "orange") +
+  labs(title = "Energy Consumption Over Time (Bar Chart)",
+       x = "Date",
+       y = "Total Energy Consumption (kWh)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+#To manipulate, make a copy of the original data frame.
+new_merge_static_house_info_df4 <- merge_static_house_info_df4 
+
+#'median_Dry_Bulb_Temperature' values should be raised by five.
+new_merge_static_house_info_df4$median_Dry_Bulb_Temperature <- new_merge_static_house_info_df4$median_Dry_Bulb_Temperature + 5
+
+#In the new data frame, show the first few rows of the modified 
+#'median_Dry_Bulb_Temperature'
+head(new_merge_static_house_info_df4$median_Dry_Bulb_Temperature)
+
+
+#In the original data frame, show the first few rows of the 
+#'median_Dry_Bulb_Temperature'
+head(merge_static_house_info_df4$median_Dry_Bulb_Temperature)
+```
+
+```{r}
+# All of the available predictor variables should be used to build a linear 
+#regression model (lmout1).
+lmout1 <- lm(day_total_energy ~median_Dry_Bulb_Temperature + 
+    in.dishwasher + median_Wind_Speed + in.hvac_heating_efficiency + 
+    in.clothes_washer + in.hvac_heating_efficiency +in.bathroom_spot_vent_hour+in.county_and_puma + 
+     + median_Direct_Normal_Radiation + median_Diffuse_Horizontal_Radiation + median_Global_Horizontal_Radiation + in.sqft + in.geometry_floor_area + in.occupants + in.hot_water_fixtures + in.vacancy_status, data = merge_static_house_info_df4)
+
+# Display the summary of the linear regression model(lmout1)
+summary(lmout1)
+```
+
+```{r}
+# Predict using the 'lmout1' linear regression model on the newly acquired
+#'new_merge_static_house_info_df4' data.
+lmout2 <- predict(lmout1, newdata = new_merge_static_house_info_df4)
+
+# Display the summary of lmout2
+summary(lmout2)
+
+# Display the length 
+length(lmout2)
+```
+
+```{r}
+# Determine the difference in the original dataset's sum of actual values and the sum of predictions (lmout2).
+increase_july <- sum(lmout2) - sum(merge_static_house_info_df4$day_total_energy)
+increase_july
+
+```
+
+```{r}
+#Determine the percentage increase in July's overall energy consumption.
+
+percentage_increase_july <- increase_july / sum(merge_static_house_info_df4$day_total_energy)
+
+# Display the  percentage increase  and calculated increase of july
+increase_july
+percentage_increase_july
+```
+
+```{r}
+# Determine the MSE, or mean squared error, between the test set's actual values and its predicted values (lmout2).
+mse <- mean((test_df1$day_total_energy - lmout2)^2)
+
+#Display the  MSE
+mse
+```
+
+```{r}
+# Conclusion:
+#We carried out extensive data preparation, including addressing missing values,
+#combining datasets, and altering characteristics, for this project's analysis of 
+#overall energy use. Analyzing exploratory data showed trends and patterns in 
+#energy use for several variables. During the predictive modeling stage, a 
+#linear regression model was trained, some features were adjusted, and the model's
+#performance was assessed using a test dataset. Metrics like Mean Absolute Percentage
+#Error (MAPE) and Root Mean Squared Error (RMSE) showed that the model was reasonably 
+#accurate. Changes to environmental parameters, such temperature, had a discernible 
+#effect on estimates of energy usage. This research offers insightful information 
+#about the variables affecting overall energy consumption and the predictive model's efficiency.
+
+```
+
+
+
+
+
+
+
+
